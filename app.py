@@ -9,6 +9,25 @@ from recommender_logic import (
 
 st.set_page_config(page_title="Smart Course Recommender", layout="wide")
 
+RESOURCE_TYPE_LABELS = {
+    "youtube_playlist": "YouTube Video",
+    "youtube_video": "YouTube Video",
+    "video": "Video",
+    "book": "Book",
+    "course": "Course",
+    "article": "Article",
+    "podcast": "Podcast",
+    "documentation": "Documentation",
+}
+
+
+def friendly_resource_type(value):
+    raw = str(value).strip().lower()
+    if raw in RESOURCE_TYPE_LABELS:
+        return RESOURCE_TYPE_LABELS[raw]
+    return raw.replace("_", " ").title()
+
+
 st.title("🎓 Smart Course Recommender Chatbot")
 st.caption("You can always ask a new learning goal in the chat box, even after making a selection.")
 
@@ -74,7 +93,7 @@ if user_prompt:
                     f"{i}. {row['title']}\n"
                     f"   Topic: {row['relevant_topic']}\n"
                     f"   Level: {row['learner_level']}\n"
-                    f"   Type: {row['resource_type']}\n"
+                    f"   Type: {friendly_resource_type(row['resource_type'])}\n"
                     f"   Cluster: {row['sent_clusters']}\n"
                     f"   Match confidence: {row['recommendation_confidence']}%\n\n"
                 )
@@ -94,7 +113,7 @@ with st.sidebar:
                 f"{idx}. **{item['title']}**  \n"
                 f"Topic: {item['relevant_topic']} | "
                 f"Level: {item['learner_level']} | "
-                f"Type: {item['resource_type']}"
+                f"Type: {friendly_resource_type(item['resource_type'])}"
             )
     else:
         st.write("No course selected yet.")
@@ -118,9 +137,11 @@ if st.session_state.awaiting_clarification and st.session_state.pending_prompt:
         )
         overrides["level"] = selected_level
     if "resource_type" in st.session_state.clarify_fields:
+        type_options = AVAILABLE_TYPES
         selected_type = st.selectbox(
             "Preferred resource type",
-            options=AVAILABLE_TYPES,
+            options=type_options,
+            format_func=friendly_resource_type,
             key="clarify_type",
         )
         overrides["resource_type"] = selected_type
@@ -149,7 +170,7 @@ if st.session_state.awaiting_clarification and st.session_state.pending_prompt:
                     f"{i}. {row['title']}\n"
                     f"   Topic: {row['relevant_topic']}\n"
                     f"   Level: {row['learner_level']}\n"
-                    f"   Type: {row['resource_type']}\n"
+                    f"   Type: {friendly_resource_type(row['resource_type'])}\n"
                     f"   Cluster: {row['sent_clusters']}\n"
                     f"   Match confidence: {row['recommendation_confidence']}%\n\n"
                 )
@@ -171,7 +192,7 @@ if (
         options=list(range(len(recs_df))),
         format_func=lambda idx: (
             f"{idx + 1}. {recs_df.iloc[idx]['title']} "
-            f"({recs_df.iloc[idx]['learner_level']}, {recs_df.iloc[idx]['resource_type']}, "
+            f"({recs_df.iloc[idx]['learner_level']}, {friendly_resource_type(recs_df.iloc[idx]['resource_type'])}, "
             f"cluster {recs_df.iloc[idx]['sent_clusters']})"
         ),
         key=choice_key,
