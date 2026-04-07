@@ -1,3 +1,4 @@
+import pandas as pd
 import streamlit as st
 from recommender_logic import (
     smart_recommend_from_prompt,
@@ -34,6 +35,48 @@ def percent(value):
 
 def friendly_text(value):
     return str(value).strip().replace("_", " ").title()
+
+
+def confidence_for(model_scores, model_name):
+    details = model_scores.get(model_name)
+    if not details:
+        return "-"
+    return f"{float(details['confidence']) * 100:.1f}%"
+
+
+def build_intent_transparency_table(intent):
+    rows = []
+    config = [
+        ("Topic", "topic", "topic_conf", "topic_model", "topic_model_scores", friendly_text),
+        ("Level", "level", "level_conf", "level_model", "level_model_scores", friendly_text),
+        (
+            "Resource type",
+            "resource_type",
+            "resource_type_conf",
+            "resource_type_model",
+            "resource_type_model_scores",
+            friendly_resource_type,
+        ),
+    ]
+
+    for label, pred_key, conf_key, model_key, scores_key, formatter in config:
+        model_scores = intent[scores_key]
+        top_conf = float(intent[conf_key])
+        selected_model = intent[model_key]
+        rows.append(
+            {
+                "Target": label,
+                "Selected": formatter(intent[pred_key]),
+                "Confidence": f"{top_conf * 100:.1f}%",
+                "Selected classifier": f"🟢 {selected_model}",
+                "LogisticRegression": confidence_for(model_scores, "LogisticRegression"),
+                "SGDClassifier": confidence_for(model_scores, "SGDClassifier"),
+                "MultinomialNB": confidence_for(model_scores, "MultinomialNB"),
+                "UserSelection": confidence_for(model_scores, "UserSelection"),
+            }
+        )
+
+    return pd.DataFrame(rows)
 
 
 st.title("🎓 Smart Course Recommender Chatbot")
@@ -110,12 +153,28 @@ if user_prompt:
                     f"   Match confidence: {row['recommendation_confidence']}%\n\n"
                 )
 
-    st.session_state.chat_history.append(("Bot", bot_reply))
+    st.session_state.chat_history.append(
+        {
+            "speaker": "Bot",
+            "message": bot_reply,
+            "intent": intent,
+        }
+    )
 
 # display conversation
-for speaker, message in st.session_state.chat_history:
-    with st.chat_message("user" if speaker == "User" else "assistant"):
-        st.write(message)
+for entry in st.session_state.chat_history:
+    if isinstance(entry, dict):
+        speaker = entry.get("speaker", "Bot")
+        message = entry.get("message", "")
+        with st.chat_message("user" if speaker == "User" else "assistant"):
+            st.write(message)
+            if speaker == "Bot" and entry.get("intent") is not None:
+                st.caption("Prediction transparency")
+                st.table(build_intent_transparency_table(entry["intent"]))
+    else:
+        speaker, message = entry
+        with st.chat_message("user" if speaker == "User" else "assistant"):
+            st.write(message)
 
 with st.sidebar:
     st.subheader("Your learning path so far")
@@ -165,6 +224,39 @@ if st.session_state.awaiting_clarification and st.session_state.pending_prompt:
             st.session_state.pending_prompt,
             overrides=overrides
         )
+        for field, value in overrides.items():
+            if field == "topic":
+                intent["topic"] = value
+                intent["topic_conf"] = 1.0
+                intent["topic_model"] = "UserSelection"
+                intent["topic_model_scores"]["UserSelection"] = {
+                    "prediction": value,
+                    "confidence": 1.0,
+                }
+            elif field == "level":
+                intent["level"] = value
+                intent["level_conf"] = 1.0
+                intent["level_model"] = "UserSelection"
+                intent["level_model_scores"]["UserSelection"] = {
+                    "prediction": value,
+                    "confidence": 1.0,
+                }
+            elif field == "resource_type":
+                intent["resource_type"] = value
+                intent["resource_type_conf"] = 1.0
+                intent["resource_type_model"] = "UserSelection"
+                intent["resource_type_model_scores"]["UserSelection"] = {
+                    "prediction": value,
+                    "confidence": 1.0,
+                }
+
+        # Keep one transparency table per original prompt:
+        # update the latest bot entry intent instead of creating a new one.
+        for idx in range(len(st.session_state.chat_history) - 1, -1, -1):
+            entry = st.session_state.chat_history[idx]
+            if isinstance(entry, dict) and entry.get("speaker") == "Bot" and entry.get("intent") is not None:
+                st.session_state.chat_history[idx]["intent"] = intent
+                break
 
         st.session_state.awaiting_clarification = False
         st.session_state.last_recs = recs
