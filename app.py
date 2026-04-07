@@ -47,28 +47,67 @@ def confidence_for(model_scores, model_name):
 def build_intent_transparency_table(intent):
     rows = []
     config = [
-        ("Topic", "topic", "topic_conf", "topic_model", "topic_model_scores", friendly_text),
-        ("Level", "level", "level_conf", "level_model", "level_model_scores", friendly_text),
+        (
+            "Topic",
+            "topic",
+            "topic_extracted",
+            "topic_model_prediction",
+            "topic_conf",
+            "topic_source",
+            "topic_reason",
+            "topic_model_scores",
+            friendly_text
+        ),
+        (
+            "Level",
+            "level",
+            "level_extracted",
+            "level_model_prediction",
+            "level_conf",
+            "level_source",
+            "level_reason",
+            "level_model_scores",
+            friendly_text
+        ),
         (
             "Resource type",
             "resource_type",
+            "resource_type_extracted",
+            "resource_type_model_prediction",
             "resource_type_conf",
-            "resource_type_model",
+            "resource_type_source",
+            "resource_type_reason",
             "resource_type_model_scores",
             friendly_resource_type,
         ),
     ]
 
-    for label, pred_key, conf_key, model_key, scores_key, formatter in config:
-        model_scores = intent[scores_key]
-        top_conf = float(intent[conf_key])
-        selected_model = intent[model_key]
+    for (
+        label,
+        final_key,
+        extracted_key,
+        model_pred_key,
+        conf_key,
+        source_key,
+        reason_key,
+        scores_key,
+        formatter
+    ) in config:
+        model_scores = intent.get(scores_key, {}) or {}
+        model_pred = formatter(intent.get(model_pred_key, "N/A"))
+        extracted_value = intent.get(extracted_key)
+        extracted_display = "-" if extracted_value is None else formatter(extracted_value)
+        top_conf = float(intent.get(conf_key, 0.0))
+        source_used = intent.get(source_key, "N/A")
         rows.append(
             {
                 "Target": label,
-                "Selected": formatter(intent[pred_key]),
-                "Confidence": f"{top_conf * 100:.1f}%",
-                "Selected classifier": f"🟢 {selected_model}",
+                "Extracted from prompt": extracted_display,
+                "Model prediction": model_pred,
+                "Model confidence": f"{top_conf * 100:.1f}%",
+                "Final selected": formatter(intent.get(final_key, "N/A")),
+                "Source used": source_used,
+                "Reason": intent.get(reason_key, "N/A"),
                 "LogisticRegression": confidence_for(model_scores, "LogisticRegression"),
                 "SGDClassifier": confidence_for(model_scores, "SGDClassifier"),
                 "MultinomialNB": confidence_for(model_scores, "MultinomialNB"),
@@ -224,31 +263,6 @@ if st.session_state.awaiting_clarification and st.session_state.pending_prompt:
             st.session_state.pending_prompt,
             overrides=overrides
         )
-        for field, value in overrides.items():
-            if field == "topic":
-                intent["topic"] = value
-                intent["topic_conf"] = 1.0
-                intent["topic_model"] = "UserSelection"
-                intent["topic_model_scores"]["UserSelection"] = {
-                    "prediction": value,
-                    "confidence": 1.0,
-                }
-            elif field == "level":
-                intent["level"] = value
-                intent["level_conf"] = 1.0
-                intent["level_model"] = "UserSelection"
-                intent["level_model_scores"]["UserSelection"] = {
-                    "prediction": value,
-                    "confidence": 1.0,
-                }
-            elif field == "resource_type":
-                intent["resource_type"] = value
-                intent["resource_type_conf"] = 1.0
-                intent["resource_type_model"] = "UserSelection"
-                intent["resource_type_model_scores"]["UserSelection"] = {
-                    "prediction": value,
-                    "confidence": 1.0,
-                }
 
         # Keep one transparency table per original prompt:
         # update the latest bot entry intent instead of creating a new one.

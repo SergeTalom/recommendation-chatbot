@@ -35,6 +35,30 @@ AVAILABLE_TOPICS = sorted(resources_df["normalized_topic"].dropna().unique().tol
 AVAILABLE_LEVELS = sorted(resources_df["normalized_level"].dropna().unique().tolist())
 AVAILABLE_TYPES = sorted(resources_df["normalized_type"].dropna().unique().tolist())
 
+RESOURCE_TYPE_SYNONYMS = {
+    "youtube video": "youtube_video",
+    "youtube videos": "youtube_video",
+    "youtube playlist": "youtube_playlist",
+    "yt video": "youtube_video",
+    "yt playlist": "youtube_playlist",
+    "video": "video",
+    "videos": "video",
+    "book": "book",
+    "books": "book",
+    "course": "course",
+    "courses": "course",
+    "article": "article",
+    "articles": "article",
+    "podcast": "podcast",
+    "podcasts": "podcast",
+    "documentation": "documentation",
+    "docs": "documentation",
+    "research paper": "research_paper",
+    "research papers": "research_paper",
+    "paper": "research_paper",
+    "papers": "research_paper",
+}
+
 # similarity vectorizer
 similarity_vectorizer = TfidfVectorizer(max_features=5000, ngram_range=(1, 2))
 similarity_vectorizer.fit(resources_df["combined_text"])
@@ -95,7 +119,43 @@ def predict_with_model_family(model_family, text):
 
     return best_prediction, best_conf, best_model, model_scores
 
+
+def extract_from_prompt(user_prompt):
+    text = str(user_prompt).strip().lower()
+    extracted = {"topic": None, "level": None, "resource_type": None}
+
+    for level in AVAILABLE_LEVELS:
+        if level in text:
+            extracted["level"] = level
+            break
+
+    matched_type = None
+    for phrase, normalized_type in RESOURCE_TYPE_SYNONYMS.items():
+        if phrase in text:
+            matched_type = normalized_type
+            break
+    if matched_type in AVAILABLE_TYPES:
+        extracted["resource_type"] = matched_type
+
+    topic_matches = [topic for topic in AVAILABLE_TOPICS if topic in text]
+    if topic_matches:
+        extracted["topic"] = max(topic_matches, key=len)
+
+    return extracted
+
+
+def resolve_field(extracted_value, model_pred, model_conf, threshold, override_value=None):
+    if override_value is not None:
+        return override_value, "UserSelection", "Provided by user clarification."
+    if extracted_value is not None:
+        return extracted_value, "PromptExtracted", "Explicitly extracted from prompt."
+    if model_conf >= threshold:
+        return model_pred, "Model", "High-confidence model prediction."
+    return model_pred, "NeedsClarification", "Low model confidence; ask clarification."
+
 def understand_prompt(user_prompt):
+    extracted = extract_from_prompt(user_prompt)
+
     topic, topic_conf, topic_model, topic_scores = predict_with_model_family(
         topic_models,
         user_prompt
@@ -109,35 +169,102 @@ def understand_prompt(user_prompt):
         user_prompt
     )
 
+    topic_final, topic_source, topic_reason = resolve_field(
+        extracted["topic"], topic, topic_conf, TOPIC_CONFIDENCE_THRESHOLD
+    )
+    level_final, level_source, level_reason = resolve_field(
+        extracted["level"], level, level_conf, LEVEL_CONFIDENCE_THRESHOLD
+    )
+    type_final, type_source, type_reason = resolve_field(
+        extracted["resource_type"], rtype, type_conf, TYPE_CONFIDENCE_THRESHOLD
+    )
+
     return {
-        "topic": topic,
+        "topic": topic_final,
         "topic_conf": topic_conf,
-        "topic_model": topic_model,
+        "topic_model": topic_model if topic_source == "Model" else topic_source,
         "topic_model_scores": topic_scores,
-        "level": level,
+        "topic_extracted": extracted["topic"],
+        "topic_model_prediction": topic,
+        "topic_source": topic_source,
+        "topic_reason": topic_reason,
+        "level": level_final,
         "level_conf": level_conf,
-        "level_model": level_model,
+        "level_model": level_model if level_source == "Model" else level_source,
         "level_model_scores": level_scores,
-        "resource_type": rtype,
+        "level_extracted": extracted["level"],
+        "level_model_prediction": level,
+        "level_source": level_source,
+        "level_reason": level_reason,
+        "resource_type": type_final,
         "resource_type_conf": type_conf,
-        "resource_type_model": type_model,
+        "resource_type_model": type_model if type_source == "Model" else type_source,
         "resource_type_model_scores": type_scores,
+        "resource_type_extracted": extracted["resource_type"],
+        "resource_type_model_prediction": rtype,
+        "resource_type_source": type_source,
+        "resource_type_reason": type_reason,
     }
 
 def smart_recommend_from_prompt(user_prompt, top_k=5, overrides=None):
-    intent = understand_prompt(user_prompt)
+    base_intent = understand_prompt(user_prompt)
     overrides = overrides or {}
 
-    topic = str(overrides.get("topic", intent["topic"])).lower()
-    level = str(overrides.get("level", intent["level"])).lower()
-    rtype = str(overrides.get("resource_type", intent["resource_type"])).lower()
+    topic_final, topic_source, topic_reason = resolve_field(
+        base_intent.get("topic_extracted"),
+        base_intent.get("topic_model_prediction"),
+        float(base_intent.get("topic_conf", 0.0)),
+        TOPIC_CONFIDENCE_THRESHOLD,
+        override_value=overrides.get("topic")
+    )
+    level_final, level_source, level_reason = resolve_field(
+        base_intent.get("level_extracted"),
+        base_intent.get("level_model_prediction"),
+        float(base_intent.get("level_conf", 0.0)),
+        LEVEL_CONFIDENCE_THRESHOLD,
+        override_value=overrides.get("level")
+    )
+    type_final, type_source, type_reason = resolve_field(
+        base_intent.get("resource_type_extracted"),
+        base_intent.get("resource_type_model_prediction"),
+        float(base_intent.get("resource_type_conf", 0.0)),
+        TYPE_CONFIDENCE_THRESHOLD,
+        override_value=overrides.get("resource_type")
+    )
+
+    intent = dict(base_intent)
+    intent["topic"] = topic_final
+    intent["topic_source"] = topic_source
+    intent["topic_reason"] = topic_reason
+    intent["topic_model"] = base_intent.get("topic_model") if topic_source == "Model" else topic_source
+    intent["level"] = level_final
+    intent["level_source"] = level_source
+    intent["level_reason"] = level_reason
+    intent["level_model"] = base_intent.get("level_model") if level_source == "Model" else level_source
+    intent["resource_type"] = type_final
+    intent["resource_type_source"] = type_source
+    intent["resource_type_reason"] = type_reason
+    intent["resource_type_model"] = (
+        base_intent.get("resource_type_model") if type_source == "Model" else type_source
+    )
+
+    if topic_source == "UserSelection":
+        intent.setdefault("topic_model_scores", {})["UserSelection"] = {"prediction": topic_final, "confidence": 1.0}
+    if level_source == "UserSelection":
+        intent.setdefault("level_model_scores", {})["UserSelection"] = {"prediction": level_final, "confidence": 1.0}
+    if type_source == "UserSelection":
+        intent.setdefault("resource_type_model_scores", {})["UserSelection"] = {"prediction": type_final, "confidence": 1.0}
+
+    topic = str(intent["topic"]).lower()
+    level = str(intent["level"]).lower()
+    rtype = str(intent["resource_type"]).lower()
     needs_clarification = []
 
-    if intent["topic_conf"] < TOPIC_CONFIDENCE_THRESHOLD and "topic" not in overrides:
+    if intent.get("topic_source") == "NeedsClarification":
         needs_clarification.append("topic")
-    if intent["level_conf"] < LEVEL_CONFIDENCE_THRESHOLD and "level" not in overrides:
+    if intent.get("level_source") == "NeedsClarification":
         needs_clarification.append("level")
-    if intent["resource_type_conf"] < TYPE_CONFIDENCE_THRESHOLD and "resource_type" not in overrides:
+    if intent.get("resource_type_source") == "NeedsClarification":
         needs_clarification.append("resource_type")
 
     topic_candidates = resources_df[
