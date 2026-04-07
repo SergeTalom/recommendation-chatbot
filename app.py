@@ -28,6 +28,14 @@ def friendly_resource_type(value):
     return raw.replace("_", " ").title()
 
 
+def percent(value):
+    return f"{float(value) * 100:.1f}%"
+
+
+def friendly_text(value):
+    return str(value).strip().replace("_", " ").title()
+
+
 st.title("🎓 Smart Course Recommender Chatbot")
 st.caption("You can always ask a new learning goal in the chat box, even after making a selection.")
 
@@ -73,6 +81,10 @@ if user_prompt:
         bot_reply = (
             "I need a bit more detail before recommending. "
             f"My confidence is low for: {needs_text}. "
+            "Here is what I predicted so far:\n\n"
+            f"- Topic: {friendly_text(intent['topic'])} ({percent(intent['topic_conf'])})\n"
+            f"- Level: {friendly_text(intent['level'])} ({percent(intent['level_conf'])})\n"
+            f"- Resource type: {friendly_resource_type(intent['resource_type'])} ({percent(intent['resource_type_conf'])})\n\n"
             "Please choose your preferences below."
         )
     else:
