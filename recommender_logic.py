@@ -8,9 +8,9 @@ from sklearn.metrics.pairwise import cosine_similarity
 
 DATA_PATH = "resources.csv"
 CLUSTER_COL = "sent_clusters"
-TOPIC_CONFIDENCE_THRESHOLD = 0.25
-LEVEL_CONFIDENCE_THRESHOLD = 0.40
-TYPE_CONFIDENCE_THRESHOLD = 0.45
+TOPIC_CONFIDENCE_THRESHOLD = 0.50
+LEVEL_CONFIDENCE_THRESHOLD = 0.60
+TYPE_CONFIDENCE_THRESHOLD = 0.60
 
 level_order = {
     "beginner": 0,
