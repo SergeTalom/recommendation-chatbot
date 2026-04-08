@@ -1,5 +1,4 @@
 import pandas as pd
-from collections import Counter
 from sklearn.pipeline import Pipeline
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
@@ -348,35 +347,44 @@ def smart_recommend_from_prompt(user_prompt, top_k=5, overrides=None):
 
     return intent, recs, needs_clarification
 
-def recommend_next_step_from_history(user_history, top_k=3):
-    if not user_history:
+def recommend_same_cluster_same_level(context_row, seen_titles, top_k=3):
+    """
+    Suggest more resources in the same cluster and same difficulty level,
+    preferring a different sub-topic (relevant_topic) when possible.
+    context_row: dict with sent_clusters, learner_level, relevant_topic (and title optional).
+    seen_titles: iterable of titles already shown or chosen.
+    """
+    if not context_row:
         return pd.DataFrame()
 
-    recent = user_history[-3:]
-
-    cluster_counts = Counter([
-        x.get(CLUSTER_COL, x.get("cluster"))
-        for x in recent
-        if x.get(CLUSTER_COL, x.get("cluster")) is not None
-    ])
-    if not cluster_counts:
+    cluster = context_row.get(CLUSTER_COL, context_row.get("cluster"))
+    if cluster is None:
         return pd.DataFrame()
-    target_cluster = cluster_counts.most_common(1)[0][0]
 
-    max_level = max(
-        level_order.get(x["learner_level"].lower(), 0)
-        for x in recent
-    )
+    level = str(context_row.get("learner_level", "")).strip().lower()
+    if level not in AVAILABLE_LEVELS:
+        return pd.DataFrame()
 
-    next_level = min(max_level + 1, 2)
-
-    seen_titles = {x["title"] for x in user_history}
+    last_topic = str(context_row.get("relevant_topic", "")).strip().lower()
+    seen = set(seen_titles) if seen_titles else set()
 
     candidates = resources_df[
-        (resources_df[CLUSTER_COL] == target_cluster) &
-        (resources_df["level_rank"] >= next_level) &
-        (~resources_df["title"].isin(seen_titles))
+        (resources_df[CLUSTER_COL] == cluster) &
+        (resources_df["normalized_level"] == level) &
+        (~resources_df["title"].isin(seen))
     ].copy()
+
+    if candidates.empty:
+        return candidates
+
+    candidates["different_topic"] = (
+        candidates["normalized_topic"] != last_topic
+    ).astype(float)
+
+    candidates = candidates.sort_values(
+        ["different_topic", "level_rank"],
+        ascending=[False, True]
+    )
 
     return (
         candidates
@@ -384,5 +392,14 @@ def recommend_next_step_from_history(user_history, top_k=3):
         .head(top_k)
         .copy()
     )
+
+
+def recommend_next_step_from_history(user_history, top_k=3):
+    """Backward-compatible name: same cluster + same level as last pick, new angles."""
+    if not user_history:
+        return pd.DataFrame()
+    last = user_history[-1]
+    seen = {x["title"] for x in user_history}
+    return recommend_same_cluster_same_level(last, seen, top_k=top_k)
 
     

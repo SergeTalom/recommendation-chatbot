@@ -29,112 +29,232 @@ def friendly_resource_type(value):
     return raw.replace("_", " ").title()
 
 
-def percent(value):
-    return f"{float(value) * 100:.1f}%"
-
-
 def friendly_text(value):
     return str(value).strip().replace("_", " ").title()
 
 
-def confidence_for(model_scores, model_name):
-    details = model_scores.get(model_name)
-    if not details:
-        return "-"
-    return f"{float(details['confidence']) * 100:.1f}%"
+def truncate_description(text, max_chars=320):
+    s = str(text or "").strip()
+    if len(s) <= max_chars:
+        return s
+    return s[: max_chars - 1].rstrip() + "…"
 
 
-def build_intent_transparency_table(intent):
-    rows = []
-    config = [
-        (
-            "Topic",
-            "topic",
-            "topic_extracted",
-            "topic_model_prediction",
-            "topic_conf",
-            "topic_source",
-            "topic_reason",
-            "topic_model_scores",
-            friendly_text
-        ),
-        (
-            "Level",
-            "level",
-            "level_extracted",
-            "level_model_prediction",
-            "level_conf",
-            "level_source",
-            "level_reason",
-            "level_model_scores",
-            friendly_text
-        ),
-        (
-            "Resource type",
-            "resource_type",
-            "resource_type_extracted",
-            "resource_type_model_prediction",
-            "resource_type_conf",
-            "resource_type_source",
-            "resource_type_reason",
-            "resource_type_model_scores",
-            friendly_resource_type,
-        ),
-    ]
+def row_to_context(row):
+    return {
+        "sent_clusters": row["sent_clusters"],
+        "learner_level": row["learner_level"],
+        "relevant_topic": row["relevant_topic"],
+        "title": row["title"],
+    }
 
-    for (
-        label,
-        final_key,
-        extracted_key,
-        model_pred_key,
-        conf_key,
-        source_key,
-        reason_key,
-        scores_key,
-        formatter
-    ) in config:
-        model_scores = intent.get(scores_key, {}) or {}
-        model_pred = formatter(intent.get(model_pred_key, "N/A"))
-        extracted_value = intent.get(extracted_key)
-        extracted_display = "-" if extracted_value is None else formatter(extracted_value)
-        top_conf = float(intent.get(conf_key, 0.0))
-        source_used = intent.get(source_key, "N/A")
-        rows.append(
-            {
-                "Target": label,
-                "Extracted from prompt": extracted_display,
-                "Model prediction": model_pred,
-                "Model confidence": f"{top_conf * 100:.1f}%",
-                "Final selected": formatter(intent.get(final_key, "N/A")),
-                "Source used": source_used,
-                "Reason": intent.get(reason_key, "N/A"),
-                "LogisticRegression": confidence_for(model_scores, "LogisticRegression"),
-                "SGDClassifier": confidence_for(model_scores, "SGDClassifier"),
-                "MultinomialNB": confidence_for(model_scores, "MultinomialNB"),
-                "UserSelection": confidence_for(model_scores, "UserSelection"),
-            }
+
+def level_stated_by_user(intent):
+    if not intent:
+        return False
+    return intent.get("level_source") in ("PromptExtracted", "UserSelection")
+
+
+def format_recommendation_body(row, intent=None):
+    title = row["title"]
+    topic = friendly_text(row["relevant_topic"])
+    level = friendly_text(row["learner_level"])
+    rtype = friendly_resource_type(row["resource_type"])
+    desc = truncate_description(row.get("description", ""))
+    if level_stated_by_user(intent):
+        lead = (
+            f"Here’s one that could be a nice fit: **{title}** — it’s a **{level}** **{rtype}** on **{topic}**."
         )
+    else:
+        lead = (
+            f"Here’s one that could be a nice fit: **{title}** — a **{rtype}** on **{topic}**.\n\n"
+            f"*The catalog tags this resource as **{level}** difficulty — you didn’t specify a level, so I’m using that tag to narrow results.*"
+        )
+    return f"{lead}\n\n{desc}"
 
-    return pd.DataFrame(rows)
+
+def invite_more_text(intent):
+    if level_stated_by_user(intent):
+        return (
+            "\n\nWant a couple more in the same ballpark (same level)? Just say **more** or **yes**. "
+            "Or ask me something new anytime."
+        )
+    return (
+        "\n\nWant a few more similar picks? Just say **more** or **yes**. "
+        "Or ask me something new anytime."
+    )
+
+
+
+# First message in chat so the greeting is clearly from the assistant, not part of the page title
+WELCOME_MESSAGE = (
+    "👋 **Hi - I’m your course assistant.**\n\n"
+    "I’m here to help you find something concrete to study - at the level and format that fits you.\n\n"
+    "**What would you like to work on?** Just describe it below in your own words."
+)
+
+
+def format_extra_rows(rows_df, intent=None):
+    lines = []
+    for i, (_, r) in enumerate(rows_df.iterrows(), start=1):
+        desc = truncate_description(r.get("description", ""), max_chars=200)
+        if level_stated_by_user(intent):
+            meta = (
+                f"{friendly_resource_type(r['resource_type'])}, "
+                f"{friendly_text(r['learner_level'])}"
+            )
+        else:
+            meta = (
+                f"{friendly_resource_type(r['resource_type'])} · "
+                f"catalog: {friendly_text(r['learner_level'])}"
+            )
+        lines.append(f"**{i}. {r['title']}** ({meta})\n{desc}")
+    return "\n\n".join(lines)
+
+
+def wants_decline(text):
+    t = str(text).strip().lower()
+    # Refusals of "more" — checked before wants_more so "nothing more" is not read as yes
+    if any(
+        p in t
+        for p in (
+            "nothing more",
+            "no more",
+            "not any more",
+            "dont want more",
+            "don't want more",
+            "need no more",
+            "no need for more",
+            "that's enough",
+            "thats enough",
+        )
+    ):
+        return True
+    keywords = (
+        "no thanks",
+        "no thank",
+        "not now",
+        "enough",
+        "stop",
+        "that's all",
+        "thats all",
+        "all set",
+        "nope",
+        "nah",
+        "don't",
+        "dont need",
+    )
+    return any(k in t for k in keywords) or t in {"no", "n"}
+
+
+def wants_more(text):
+    t = str(text).strip().lower()
+    if wants_decline(t):
+        return False
+    if len(t) > 80:
+        return False
+    keywords = (
+        "yes",
+        "yeah",
+        "yep",
+        "sure",
+        "more",
+        "show me",
+        "please",
+        "extra",
+        "another",
+        "others",
+        "suggestions",
+        "ideas",
+        "couple",
+        "few",
+        "2",
+        "3",
+        "go on",
+        "continue",
+        "list",
+    )
+    return any(k in t for k in keywords) or t in {"y", "ok", "okay"}
+
+
+def looks_like_fresh_topic(text):
+    """Long or question-like input → treat as new learning request."""
+    t = str(text).strip()
+    if len(t) > 100:
+        return True
+    starters = ("i want", "i'd like", "teach me", "learn", "how ", "what ", "show me how", "find me")
+    return any(t.lower().startswith(s) for s in starters) and len(t) > 25
+
+
+def append_bot_message(text):
+    st.session_state.chat_history.append({"speaker": "Bot", "message": text})
+
+
+def format_preferences_user_message(overrides):
+    """Turn clarification picks into a natural chat line (no raw dataset keys)."""
+    if not overrides:
+        return "Here’s what works for me."
+    topic = friendly_text(overrides["topic"]) if "topic" in overrides else None
+    level = friendly_text(overrides["level"]) if "level" in overrides else None
+    rtype = friendly_resource_type(overrides["resource_type"]) if "resource_type" in overrides else None
+
+    if topic and level and rtype:
+        return (
+            f"I’d like to study **{topic}** at **{level}** level, "
+            f"preferably as **{rtype}**."
+        )
+    if topic and level:
+        return f"Let’s focus on **{topic}** at **{level}** level."
+    if topic and rtype:
+        return f"I’d like **{topic}** in **{rtype}** format."
+    if level and rtype:
+        return f"I’m looking for **{rtype}** materials at **{level}** level."
+    if topic:
+        return f"Let’s focus on **{topic}**."
+    if level:
+        return f"I’m aiming for **{level}** level."
+    if rtype:
+        return f"I prefer **{rtype}**."
+    return "Here’s what works for me."
+
+
+def more_same_cluster(context_row, seen_titles, top_k=3):
+    """
+    Same cluster + same level + new angles
+    """
+    if not context_row or not seen_titles:
+        return pd.DataFrame()
+    uh = []
+    for t in seen_titles:
+        uh.append({
+            "title": t,
+            "learner_level": context_row["learner_level"],
+            "relevant_topic": context_row["relevant_topic"],
+            "sent_clusters": context_row["sent_clusters"],
+        })
+    if uh:
+        uh[-1] = {**uh[-1], **{k: v for k, v in context_row.items() if v is not None}}
+    return recommend_next_step_from_history(uh, top_k=top_k)
 
 
 st.title("🎓 Smart Course Recommender Chatbot")
-st.caption("You can always ask a new learning goal in the chat box, even after making a selection.")
+st.caption(
+    "A friendly assistant that suggests courses and learning materials matched to your topic, level, and how you like to study."
+)
+st.divider()
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
 
+if "welcome_inserted" not in st.session_state:
+    st.session_state.welcome_inserted = True
+    st.session_state.chat_history.insert(
+        0,
+        {"speaker": "Bot", "message": WELCOME_MESSAGE},
+    )
+
 if "user_history" not in st.session_state:
     st.session_state.user_history = []
-
-if "last_recs" not in st.session_state:
-    st.session_state.last_recs = None
-
-if "awaiting_selection" not in st.session_state:
-    st.session_state.awaiting_selection = False
-
-if "recs_version" not in st.session_state:
-    st.session_state.recs_version = 0
 
 if "awaiting_clarification" not in st.session_state:
     st.session_state.awaiting_clarification = False
@@ -145,60 +265,185 @@ if "pending_prompt" not in st.session_state:
 if "clarify_fields" not in st.session_state:
     st.session_state.clarify_fields = []
 
-user_prompt = st.chat_input("Describe what you want to learn, or ask a new follow-up...")
+if "awaiting_more_offer" not in st.session_state:
+    st.session_state.awaiting_more_offer = False
+
+if "recs_pool" not in st.session_state:
+    st.session_state.recs_pool = None
+
+if "shown_titles" not in st.session_state:
+    st.session_state.shown_titles = set()
+
+if "context_row" not in st.session_state:
+    st.session_state.context_row = None
+
+if "last_intent" not in st.session_state:
+    st.session_state.last_intent = None
+
+user_prompt = st.chat_input("Tell me what you’d like to learn…")
 
 if user_prompt:
     st.session_state.chat_history.append(("User", user_prompt))
 
-    intent, recs, needs_clarification = smart_recommend_from_prompt(user_prompt)
-
-    if needs_clarification:
-        st.session_state.awaiting_clarification = True
-        st.session_state.awaiting_selection = False
-        st.session_state.pending_prompt = user_prompt
-        st.session_state.clarify_fields = needs_clarification
-        st.session_state.last_recs = None
-
-        needs_text = ", ".join(needs_clarification)
-        bot_reply = (
-            "I need a bit more detail before recommending. "
-            f"My confidence is low for: {needs_text}. "
-            "Here is what I predicted so far:\n\n"
-            f"- Topic: {friendly_text(intent['topic'])} ({percent(intent['topic_conf'])})\n"
-            f"- Level: {friendly_text(intent['level'])} ({percent(intent['level_conf'])})\n"
-            f"- Resource type: {friendly_resource_type(intent['resource_type'])} ({percent(intent['resource_type_conf'])})\n\n"
-            "Please choose your preferences below."
+    # Follow-up after a recommendation: user declines more (check before "more" — avoids "nothing more" → yes)
+    if (
+        st.session_state.awaiting_more_offer
+        and wants_decline(user_prompt)
+        and len(user_prompt) < 160
+    ):
+        append_bot_message(
+            "No problem — I’ll leave it there. Whenever you want to explore something new, just say so."
         )
-    else:
-        st.session_state.awaiting_clarification = False
-        st.session_state.last_recs = recs
-        st.session_state.awaiting_selection = not recs.empty
-        st.session_state.recs_version += 1
+        st.session_state.awaiting_more_offer = False
+        st.session_state.recs_pool = None
+        st.session_state.context_row = None
+        st.session_state.shown_titles = set()
+        st.session_state.last_intent = None
 
-        if recs.empty:
-            bot_reply = "Sorry, I could not find recommendations."
-        else:
-            bot_reply = (
-                "Here are my recommendations with confidence scores. "
-                "Please choose one below:\n\n"
+    elif (
+        st.session_state.awaiting_more_offer
+        and st.session_state.recs_pool is not None
+        and st.session_state.context_row is not None
+        and wants_more(user_prompt)
+        and not looks_like_fresh_topic(user_prompt)
+    ):
+        pool = st.session_state.recs_pool.reset_index(drop=True)
+        shown = set(st.session_state.shown_titles)
+        extra = []
+        for _, row in pool.iterrows():
+            if row["title"] not in shown and len(extra) < 3:
+                extra.append(row)
+                shown.add(row["title"])
+
+        extra_df = pd.DataFrame(extra) if extra else pd.DataFrame()
+
+        if len(extra) < 2:
+            more = more_same_cluster(
+                st.session_state.context_row,
+                shown,
+                top_k=3,
             )
-            for i, (_, row) in enumerate(recs.iterrows(), start=1):
-                bot_reply += (
-                    f"{i}. {row['title']}\n"
-                    f"   Topic: {row['relevant_topic']}\n"
-                    f"   Level: {row['learner_level']}\n"
-                    f"   Type: {friendly_resource_type(row['resource_type'])}\n"
-                    f"   Cluster: {row['sent_clusters']}\n"
-                    f"   Match confidence: {row['recommendation_confidence']}%\n\n"
+            if not more.empty:
+                for _, r in more.iterrows():
+                    if r["title"] not in shown and len(extra) < 3:
+                        extra.append(r)
+                        shown.add(r["title"])
+                extra_df = pd.DataFrame(extra) if extra else extra_df
+
+        li = st.session_state.get("last_intent")
+        if extra_df is not None and not extra_df.empty:
+            if level_stated_by_user(li):
+                intro = (
+                    "Sure thing — here are a few more at the same level, "
+                    "each from a slightly different angle:\n\n"
+                )
+            else:
+                intro = (
+                    "Sure thing — here are a few more picks in a similar vein "
+                    "(difficulty labels come from the catalog):\n\n"
+                )
+            msg = (
+                intro
+                + format_extra_rows(extra_df, intent=li)
+                + "\n\nWhen you’re ready for a totally new direction, just type it."
+            )
+        else:
+            msg = (
+                "I’m running low on fresh picks in that same spot. "
+                "Try rephrasing, or ask about something else — happy to help."
+            )
+
+        st.session_state.shown_titles = shown
+        if extra_df is not None and not extra_df.empty:
+            for _, r in extra_df.iterrows():
+                st.session_state.user_history.append(
+                    {
+                        "title": r["title"],
+                        "description": r.get("description", ""),
+                        "relevant_topic": r["relevant_topic"],
+                        "learner_level": r["learner_level"],
+                        "resource_type": r["resource_type"],
+                        "sent_clusters": r["sent_clusters"],
+                    }
                 )
 
-    st.session_state.chat_history.append(
-        {
-            "speaker": "Bot",
-            "message": bot_reply,
-            "intent": intent,
-        }
-    )
+        st.session_state.awaiting_more_offer = False
+        st.session_state.recs_pool = None
+        st.session_state.context_row = None
+        st.session_state.last_intent = None
+        append_bot_message(msg)
+
+    else:
+        # New recommendation request (or user ignored the follow-up with a full new question)
+        intent, recs, needs_clarification = smart_recommend_from_prompt(user_prompt)
+        st.session_state.awaiting_more_offer = False
+        st.session_state.recs_pool = None
+        st.session_state.context_row = None
+        st.session_state.shown_titles = set()
+
+        if needs_clarification:
+            st.session_state.awaiting_clarification = True
+            st.session_state.pending_prompt = user_prompt
+            st.session_state.clarify_fields = needs_clarification
+            st.session_state.last_intent = intent
+            field_help = {
+                "topic": "the topic",
+                "level": "the difficulty level",
+                "resource_type": "the format (book, video, paper, etc.)",
+            }
+            unsure_parts = [field_help[f] for f in needs_clarification if f in field_help]
+            unsure_text = ", ".join(unsure_parts)
+            guess_bits = []
+            if "topic" in needs_clarification:
+                guess_bits.append(f"**{friendly_text(intent['topic'])}**")
+            if "level" in needs_clarification:
+                guess_bits.append(f"**{friendly_text(intent['level'])}**")
+            if "resource_type" in needs_clarification:
+                guess_bits.append(f"**{friendly_resource_type(intent['resource_type'])}**")
+            if len(guess_bits) == 1:
+                guess_line = f"My best guess for that is {guess_bits[0]} — but I’d rather you choose."
+            elif len(guess_bits) == 2:
+                guess_line = (
+                    f"I’m tentatively thinking {guess_bits[0]} and {guess_bits[1]} — "
+                    f"pick what fits you below."
+                )
+            else:
+                guess_line = (
+                    f"I’m tentatively thinking {guess_bits[0]}, {guess_bits[1]}, and {guess_bits[2]} — "
+                    f"adjust below if that’s off."
+                )
+            append_bot_message(
+                f"Hmm — I’m not fully sure about {unsure_text}. {guess_line}"
+            )
+        elif recs.empty:
+            st.session_state.last_intent = None
+            append_bot_message(
+                "I couldn’t find a great match for that just yet. "
+                "Maybe try different words, or another topic — I’ll keep digging."
+            )
+        else:
+            primary = recs.iloc[0]
+            st.session_state.last_intent = intent
+            st.session_state.recs_pool = recs
+            st.session_state.context_row = row_to_context(primary)
+            st.session_state.shown_titles = {primary["title"]}
+            st.session_state.awaiting_more_offer = True
+
+            st.session_state.user_history.append(
+                {
+                    "title": primary["title"],
+                    "description": primary.get("description", ""),
+                    "relevant_topic": primary["relevant_topic"],
+                    "learner_level": primary["learner_level"],
+                    "resource_type": primary["resource_type"],
+                    "sent_clusters": primary["sent_clusters"],
+                }
+            )
+
+            append_bot_message(
+                format_recommendation_body(primary, intent=intent)
+                + invite_more_text(intent)
+            )
 
 # display conversation
 for entry in st.session_state.chat_history:
@@ -206,14 +451,11 @@ for entry in st.session_state.chat_history:
         speaker = entry.get("speaker", "Bot")
         message = entry.get("message", "")
         with st.chat_message("user" if speaker == "User" else "assistant"):
-            st.write(message)
-            if speaker == "Bot" and entry.get("intent") is not None:
-                st.caption("Prediction transparency")
-                st.table(build_intent_transparency_table(entry["intent"]))
+            st.markdown(message)
     else:
         speaker, message = entry
         with st.chat_message("user" if speaker == "User" else "assistant"):
-            st.write(message)
+            st.markdown(message)
 
 with st.sidebar:
     st.subheader("Your learning path so far")
@@ -221,141 +463,73 @@ with st.sidebar:
         for idx, item in enumerate(st.session_state.user_history, start=1):
             st.markdown(
                 f"{idx}. **{item['title']}**  \n"
-                f"Topic: {item['relevant_topic']} | "
-                f"Level: {item['learner_level']} | "
-                f"Type: {friendly_resource_type(item['resource_type'])}"
+                f"{friendly_text(item['relevant_topic'])} · "
+                f"{friendly_text(item['learner_level'])} · "
+                f"{friendly_resource_type(item['resource_type'])}"
             )
     else:
-        st.write("No course selected yet.")
+        st.write("Your picks will show up here as we chat.")
 
 if st.session_state.awaiting_clarification and st.session_state.pending_prompt:
-    st.subheader("Help me refine your request")
-
+    st.caption("Quick picks — choose what fits you:")
     overrides = {}
     if "topic" in st.session_state.clarify_fields:
-        selected_topic = st.selectbox(
-            "Preferred topic",
+        overrides["topic"] = st.selectbox(
+            "Topic",
             options=AVAILABLE_TOPICS,
             key="clarify_topic",
         )
-        overrides["topic"] = selected_topic
     if "level" in st.session_state.clarify_fields:
-        selected_level = st.selectbox(
-            "Preferred level",
+        overrides["level"] = st.selectbox(
+            "Level",
             options=AVAILABLE_LEVELS,
             key="clarify_level",
         )
-        overrides["level"] = selected_level
     if "resource_type" in st.session_state.clarify_fields:
-        type_options = AVAILABLE_TYPES
-        selected_type = st.selectbox(
-            "Preferred resource type",
-            options=type_options,
+        overrides["resource_type"] = st.selectbox(
+            "Resource type",
+            options=AVAILABLE_TYPES,
             format_func=friendly_resource_type,
             key="clarify_type",
         )
-        overrides["resource_type"] = selected_type
 
-    if st.button("Apply preferences", key="apply_clarification"):
-        prefs_text = ", ".join([f"{k}={v}" for k, v in overrides.items()])
-        st.session_state.chat_history.append(("User", f"My preferences: {prefs_text}"))
+    if st.button("Apply", key="apply_clarification"):
+        st.session_state.chat_history.append(
+            ("User", format_preferences_user_message(overrides))
+        )
         intent, recs, _ = smart_recommend_from_prompt(
             st.session_state.pending_prompt,
-            overrides=overrides
+            overrides=overrides,
         )
-
-        # Keep one transparency table per original prompt:
-        # update the latest bot entry intent instead of creating a new one.
-        for idx in range(len(st.session_state.chat_history) - 1, -1, -1):
-            entry = st.session_state.chat_history[idx]
-            if isinstance(entry, dict) and entry.get("speaker") == "Bot" and entry.get("intent") is not None:
-                st.session_state.chat_history[idx]["intent"] = intent
-                break
-
         st.session_state.awaiting_clarification = False
-        st.session_state.last_recs = recs
-        st.session_state.awaiting_selection = not recs.empty
-        st.session_state.recs_version += 1
         st.session_state.pending_prompt = ""
         st.session_state.clarify_fields = []
 
         if recs.empty:
-            bot_reply = "Thanks. I still could not find recommendations with those preferences."
-        else:
-            bot_reply = "Great, here are refined recommendations:\n\n"
-            for i, (_, row) in enumerate(recs.iterrows(), start=1):
-                bot_reply += (
-                    f"{i}. {row['title']}\n"
-                    f"   Topic: {row['relevant_topic']}\n"
-                    f"   Level: {row['learner_level']}\n"
-                    f"   Type: {friendly_resource_type(row['resource_type'])}\n"
-                    f"   Cluster: {row['sent_clusters']}\n"
-                    f"   Match confidence: {row['recommendation_confidence']}%\n\n"
-                )
-        st.session_state.chat_history.append(("Bot", bot_reply))
-        st.rerun()
-
-if (
-    st.session_state.awaiting_selection
-    and st.session_state.last_recs is not None
-    and not st.session_state.last_recs.empty
-):
-    st.subheader("Choose one recommendation to continue")
-
-    recs_df = st.session_state.last_recs.reset_index(drop=True)
-    choice_key = f"rec_choice_{st.session_state.recs_version}"
-
-    selected_idx = st.radio(
-        "Recommended options",
-        options=list(range(len(recs_df))),
-        format_func=lambda idx: (
-            f"{idx + 1}. {recs_df.iloc[idx]['title']} "
-            f"({recs_df.iloc[idx]['learner_level']}, {friendly_resource_type(recs_df.iloc[idx]['resource_type'])}, "
-            f"cluster {recs_df.iloc[idx]['sent_clusters']})"
-        ),
-        key=choice_key,
-    )
-
-    if st.button("Confirm selection", key=f"confirm_choice_{st.session_state.recs_version}"):
-        selected_row = recs_df.iloc[selected_idx]
-        selected_title = selected_row["title"]
-
-        st.session_state.chat_history.append(
-            ("User", f"I choose: {selected_title}")
-        )
-
-        history_entry = {
-            "title": selected_row["title"],
-            "description": selected_row.get("description", ""),
-            "relevant_topic": selected_row["relevant_topic"],
-            "learner_level": selected_row["learner_level"],
-            "resource_type": selected_row["resource_type"],
-            "sent_clusters": selected_row["sent_clusters"],
-        }
-        st.session_state.user_history.append(history_entry)
-
-        followup = recommend_next_step_from_history(st.session_state.user_history)
-
-        if not followup.empty:
-            followup_text = (
-                f"Nice choice. Since you selected '{selected_title}', "
-                "here is a suggested next learning step:\n\n"
+            st.session_state.last_intent = None
+            append_bot_message(
+                "Thanks — still nothing solid with those picks. Fancy trying different options below?"
             )
-            for j, (_, r) in enumerate(followup.iterrows(), start=1):
-                followup_text += (
-                    f"{j}. {r['title']}\n"
-                    f"   Topic: {r['relevant_topic']}\n"
-                    f"   Level: {r['learner_level']}\n\n"
-                )
-            followup_text += "You can now select another recommendation or type a new learning request in chat."
         else:
-            followup_text = (
-                f"Nice choice: '{selected_title}'. I do not have another next-step "
-                "recommendation yet from your current history. "
-                "You can ask for a new topic in the chat box."
+            primary = recs.iloc[0]
+            st.session_state.last_intent = intent
+            st.session_state.recs_pool = recs
+            st.session_state.context_row = row_to_context(primary)
+            st.session_state.shown_titles = {primary["title"]}
+            st.session_state.awaiting_more_offer = True
+            st.session_state.user_history.append(
+                {
+                    "title": primary["title"],
+                    "description": primary.get("description", ""),
+                    "relevant_topic": primary["relevant_topic"],
+                    "learner_level": primary["learner_level"],
+                    "resource_type": primary["resource_type"],
+                    "sent_clusters": primary["sent_clusters"],
+                }
             )
-
-        st.session_state.chat_history.append(("Bot", followup_text))
-        st.session_state.awaiting_selection = False
-        st.session_state.last_recs = None
+            append_bot_message(
+                "Nice — here’s what I’d go with:\n\n"
+                + format_recommendation_body(primary, intent=intent)
+                + invite_more_text(intent)
+            )
         st.rerun()
