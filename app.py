@@ -40,6 +40,40 @@ def truncate_description(text, max_chars=320):
     return s[: max_chars - 1].rstrip() + "…"
 
 
+def clean_value(value):
+    if value is None:
+        return None
+    s = str(value).strip()
+    if not s or s.lower() in {"nan", "none", "nat"}:
+        return None
+    return s
+
+
+def extract_year(value):
+    raw = clean_value(value)
+    if not raw:
+        return None
+    for token in raw.replace("/", "-").split("-"):
+        token = token.strip()
+        if len(token) == 4 and token.isdigit():
+            return token
+    if len(raw) >= 4 and raw[:4].isdigit():
+        return raw[:4]
+    return None
+
+
+def source_note(row):
+    author = clean_value(row.get("creator_name"))
+    year = extract_year(row.get("release_date"))
+    if author and year:
+        return f"Created by **{author}** ({year})."
+    if author:
+        return f"Created by **{author}**."
+    if year:
+        return f"Published in **{year}**."
+    return ""
+
+
 def row_to_context(row):
     return {
         "sent_clusters": row["sent_clusters"],
@@ -70,7 +104,9 @@ def format_recommendation_body(row, intent=None):
             f"Here’s one that could be a nice fit: **{title}** — a **{rtype}** on **{topic}**.\n\n"
             f"*The catalog tags this resource as **{level}** difficulty — you didn’t specify a level, so I’m using that tag to narrow results.*"
         )
-    return f"{lead}\n\n{desc}"
+    note = source_note(row)
+    extra = f"\n\n{note}" if note else ""
+    return f"{lead}\n\n{desc}{extra}"
 
 
 def invite_more_text(intent):
@@ -98,6 +134,7 @@ def format_extra_rows(rows_df, intent=None):
     lines = []
     for i, (_, r) in enumerate(rows_df.iterrows(), start=1):
         desc = truncate_description(r.get("description", ""), max_chars=200)
+        note = source_note(r)
         if level_stated_by_user(intent):
             meta = (
                 f"{friendly_resource_type(r['resource_type'])}, "
@@ -108,7 +145,8 @@ def format_extra_rows(rows_df, intent=None):
                 f"{friendly_resource_type(r['resource_type'])} · "
                 f"catalog: {friendly_text(r['learner_level'])}"
             )
-        lines.append(f"**{i}. {r['title']}** ({meta})\n{desc}")
+        note_line = f"\n{note}" if note else ""
+        lines.append(f"**{i}. {r['title']}** ({meta})\n{desc}{note_line}")
     return "\n\n".join(lines)
 
 
