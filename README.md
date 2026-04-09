@@ -51,7 +51,7 @@ pip install -r requirements.txt
 3. Run the application
 streamlit run app.py
 
-The app will usually open at http://localhost:8501
+The app will usually open at https://recommendation-chatbot.streamlit.app/
 
 Dependencies
 	- Streamlit
